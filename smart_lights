@@ -1,0 +1,768 @@
+#define WIFI_TIMEOUT_MS 200
+
+#define MQTT_SERIAL_PUBLISH_CH "it313/channel/transmitted_packets"
+#define MQTT_SERIAL_RECEIVER_CH "it313/channel/received_packets"
+#define MQTT_TEMP_PUBLISH_CH "xlabs/channel/published_temps"
+#define MQTT_COLOR "it313/smart-lights/"
+#define MQTT_SLIDER "mqtt/value/slider"
+#define MQTT_TEMP "it313/channel/temperature"
+#define MQTT_STATUS "it313/channel/status"
+#define MQTT_PING "it313/channel/ping/64"
+
+
+#define TIMER_INTERVAL 10000000  // If variable useed timer interval in microseconds (every 10 secs)
+#define PIN 5
+#define NUMPIXELS 8
+
+#include <Adafruit_NeoPixel.h>
+#include "credentials.h"
+#include <driver/adc.h>       /* C:\Users\bacag\AppData\Local\Arduino15\packages\esp32\hardware\esp32\2.0.17\tools\sdk\esp32\include\driver\include\driver\adc.h */
+#include <WiFi.h>             /* C:\Users\bacag\AppData\Local\Arduino15\packages\esp32\hardware\esp32\2.0.17\libraries\WiFi\src\WiFi.h */
+#include <WiFiClientSecure.h> /* WiFiClient Library for encrypting data over SSL/TSL */
+#include "certificate.h"
+#include <PubSubClient.h> /* MQTT Publish/Subscribe Library by Nick O'Leary v2.8 imported from Library Manager */
+#include <Arduino_JSON.h> /* Arduino_JSON by Arduino: Process JSON in your Arduino Sketches v0.2.0 imported from Library Manager */
+
+// This code is demonstrated at: https://iotfall24.iotserver.website/
+
+/* ===== ADD TIMER INTERRUPTS ========================= */
+volatile int interrupts;
+int counter = 1;
+
+/* Instantiate New Timer Interrupt and Enable */
+hw_timer_t *timer = NULL;
+portMUX_TYPE timerMux = portMUX_INITIALIZER_UNLOCKED;
+/* ===================================================== */
+
+int device_id = 64;
+int LED_pin = 5;
+double tempC;
+double tempF;
+const char *ssid = mySSID_0;
+const char *password = myPASSWORD_0;
+float voltage;
+const char* server = "google.com";
+
+int currentRGB[3] = {255, 255, 255};
+float scale = 1;
+String globalStatus = "";
+
+WiFiClientSecure wifiClient2;
+
+// Instantiate a secure WiFi client and direct MQTT client to use it
+WiFiClientSecure wifiClient;
+PubSubClient client(wifiClient);
+Adafruit_NeoPixel pixels(NUMPIXELS, PIN, NEO_GRB + NEO_KHZ800);
+
+void connect_wifi_secure() {
+  delay(10);
+  Serial.println();
+  Serial.print("Connecting to ");
+  Serial.println(ssid);
+  WiFi.begin(ssid, password);
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.print(".");
+  }
+  randomSeed(micros());
+  Serial.println("");
+  Serial.println("WiFi connected");
+  Serial.println("IP address: ");
+  Serial.println(WiFi.localIP());
+}
+
+void connect_mqtt_server_secure() {
+  /* Loop until we're reconnected */
+  unsigned long startAttemptConnectMQTTTime = millis();
+  while (!client.connected() and startAttemptConnectMQTTTime - millis() < 5000) {
+    Serial.print("Attempting connection to ");
+    Serial.print(MQTT_SERVER);
+    Serial.print("...");
+
+    /* Create a random client ID- */
+    String clientId = "ESP32Client-";
+    clientId += String(random(0xffff), HEX);
+
+    /* Attempt to connect */
+    if (client.connect(clientId.c_str(), MQTT_USER, MQTT_PASSWORD)) {
+      Serial.println("Connection Successful!");
+
+      /* Visual Indication of Connection to MQTT Broker */
+      for (int i = 0; i < 5; i++) {
+        digitalWrite(5, HIGH);
+        delay(75);
+        digitalWrite(5, LOW);
+        delay(75);
+      }
+
+      /* Once connected, publish an announcement... */
+      // client.publish("it313/channel/connect_notification", "Jacob's ESP 32 Connected");
+
+      /* ... and resubscribe */
+      client.subscribe(MQTT_COLOR);
+      client.subscribe(MQTT_SERIAL_PUBLISH_CH);
+      client.subscribe(MQTT_SLIDER);
+      client.subscribe(MQTT_TEMP);
+      // client.subscribe(MQTT_SERIAL_RECEIVER_CH);
+      client.subscribe(MQTT_STATUS);
+      client.subscribe(MQTT_PING);
+
+
+
+
+
+
+    } else {
+      Serial.print("failed, rc=");
+      Serial.print(client.state());
+      ESP.restart();
+    }
+  }
+}
+
+void setup_wifi() {
+
+  const char *ssid;
+  const char *password;
+
+  int n = WiFi.scanNetworks();
+  if (n == 0) {
+    Serial.println("No Networks Found!");
+  } else {
+    for (int i = 0; i < n; ++i) {
+      if (WiFi.SSID(i) == "JAM16") {
+        // Update these with values suitable for your network from credential.h.
+        ssid = mySSID_0;
+        password = myPASSWORD_0;
+        break;
+      } else if (WiFi.SSID(i) == "JMU5") {
+        // Update these with values suitable for your network from credential.h.
+        ssid = mySSID_1;
+        password = myPASSWORD_1;
+        break;
+      } else {
+        // Update these with values suitable for your network from credential.h.
+        ssid = mySSID_2;
+        password = myPASSWORD_2;
+      }
+    }
+  }
+
+  unsigned long startConnectWiFiTime = millis();
+  int wifiCounter = 0;
+
+  delay(10);
+  // We start by connecting to a WiFi network
+  Serial.println();
+  Serial.print("Connecting to ");
+  Serial.println(ssid);
+  WiFi.begin(ssid, password);
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.print(".");
+    if (startConnectWiFiTime - millis() > 20000) {
+      wifiCounter += 1;
+    }
+    if (wifiCounter > 20) {
+      wifiCounter = 0;
+      ESP.restart();
+    }
+  }
+  randomSeed(micros());
+  Serial.println("");
+  Serial.println("WiFi connected");
+  Serial.println("IP address: ");
+  Serial.println(WiFi.localIP());
+  for (int i = 0; i < 5; i++) {
+    digitalWrite(5, HIGH);
+    delay(250);
+    digitalWrite(5, LOW);
+    delay(250);
+  }
+  /* Set the CA_CERTIFICATE to be used by wifiClient -- root_ca must be created
+     copied, and pasted in certificate.h -- Tutorial to create ca_root certificate: https://www.youtube.com/watch?v=Wm1xKj4bKsY */
+  wifiClient.setCACert(root_ca);
+
+  client.setServer(MQTT_SERVER, MQTT_PORT);
+  client.setCallback(callback);
+  connect_mqtt_server_secure();
+}
+
+void callback(char *topic, byte *payload, unsigned int length) {
+  Serial.println("-------new message from broker-----");
+  Serial.print("channel:");
+  Serial.println(topic);
+  Serial.print("data:");
+  Serial.write(payload, length);
+  Serial.println();
+ if (strcmp(topic, "it313/smart-lights/") == 0){
+    changeColor(payload, length);
+  }
+ if (strcmp(topic, "it313/channel/temperature") == 0){
+    changeTemp(payload, length);
+  }
+ if (strcmp(topic, "it313/channel/status") == 0){
+    changeStatus(payload, length);
+ }
+ if (strcmp(topic, "it313/channel/ping/64") == 0){
+    publishDeviceStatus(payload, length);
+ }
+ else{
+    changeBrightness(payload, length);
+ }
+}
+
+// Function to publish device status
+void publishDeviceStatus(byte *payload, unsigned int length) {
+  String topic = "it313/channel/ping";
+  String data = "{\"status\":\"online\",\"device_id\":64}";
+
+  // Convert `String` to `const char*`
+  client.publish(topic.c_str(), data.c_str());
+  Serial.print("Published status: ");
+  Serial.println(data);
+}
+
+void changeStatus(byte *payload, unsigned int length) {
+  if (!client.connected()) {
+    connect_mqtt_server_secure();
+  }
+  // Create a char array with a length one char greater than the incoming payload
+  char p[length + 1];
+  /* memcpy copies the byte pattern from payload and copies it to new char array p
+     Copies count bytes from the object pointed to by src to the object pointed to by dest.
+     Most important => Both objects are reinterpreted as arrays of unsigned char */
+  memcpy(p, payload, length);
+  p[length] = '\0';
+  /* Cast the char array p to a String variable called message; This String can now
+     be parse to a JSONVar using JSON.parse(message) */
+  String message(p);
+  Serial.print("From changeStatus(): ");
+  Serial.write(payload, length);
+  Serial.println();
+  Serial.println("Parse Actuator command");
+  //  const char messageTemplate[] = const char (message);
+  JSONVar jsonObject = JSON.parse(message);
+  const char* rawdevice_id = (const char*)jsonObject["device_id"];
+  String device_id(rawdevice_id);
+  const char* rawstatus = (const char*)jsonObject["message"];
+  String status(rawstatus);
+  Serial.print("Received Message for Device: ");
+  Serial.println(device_id);
+  Serial.println("Status Change Received: "+status);
+  if (device_id.equals("64")) {
+    if (status.equals("On")){
+      Serial.println(currentRGB[0]);
+      Serial.println(currentRGB[1]);
+      Serial.println(currentRGB[2]);
+
+      String topic = MQTT_SERIAL_RECEIVER_CH;
+      String payload = "{\"status\":\"success\",";
+      payload += "\"device_id\":\"";
+      payload += device_id;
+      payload += "\",\"device_status\":\"";
+      payload += status; // Make sure 'status' has a valid value
+      payload += "\"}";
+
+
+      globalStatus = status;
+
+
+      // Publish the payload to the MQTT broker
+      client.publish(topic.c_str(), payload.c_str());
+      Serial.print("Success response sent: ");
+      Serial.println(payload);
+
+      // Add a delay to avoid spamming the broker
+      delay(5000);
+
+      pixels.clear();  // Set all pixel colors to 'off'
+      uint32_t color = pixels.Color(scale*currentRGB[0], scale*currentRGB[1], scale*currentRGB[2]);
+      pixels.fill(color);
+      pixels.show();
+      Serial.println((const char *)jsonObject["message"]);
+      if ((String)(const char *)jsonObject["message"] == "On") {
+      digitalWrite(LED_pin, HIGH);
+      Serial.println("LED is ON");
+      } else if ((String)(const char *)jsonObject["message"] == "Off") {
+      digitalWrite(LED_pin, LOW);
+      Serial.println("LED is Off");
+      }
+    } else {
+
+      Serial.println("Turning Light Off");
+
+      // Ensure status is valid
+      if (status.length() == 0) {
+          Serial.println("Status is empty. Setting default value.");
+          status = "Off"; // Default fallback
+      }
+
+      String topic = MQTT_SERIAL_RECEIVER_CH;
+      String payload = "{\"status\":\"success\",";
+      payload += "\"device_id\":\"";
+      payload += device_id;
+      payload += "\",\"device_status\":\"";
+      payload += status; // Ensures `status` has a valid value
+      payload += "\"}";
+
+      // Publish the payload to the MQTT broker
+      client.publish(topic.c_str(), payload.c_str());
+      Serial.print("Success response sent: ");
+      Serial.println(payload);
+
+      // Add a delay to avoid spamming the broker
+      delay(5000);
+
+      // // Publish the payload to the MQTT broker
+      client.publish(topic.c_str(), payload.c_str());
+      Serial.print("Success response sent: ");
+      Serial.println(payload);
+
+      // Add a delay to avoid spamming the broker
+      delay(5000);
+
+
+      pixels.clear();  // Set all pixel colors to 'off'
+      uint32_t color = pixels.Color(0, 0, 0);
+      pixels.fill(color);
+      pixels.show();
+      Serial.println((const char *)jsonObject["message"]);
+      if ((String)(const char *)jsonObject["message"] == "On") {
+      digitalWrite(LED_pin, HIGH);
+      Serial.println("LED is ON");
+    } else if ((String)(const char *)jsonObject["message"] == "Off") {
+      digitalWrite(LED_pin, LOW);
+      Serial.println("LED is Off");
+    }
+    }
+  }
+}
+
+// void sendGetRequest() {
+
+//   if (wifiClient.connect(server, 443)) {
+//         Serial.println("Connected to server");
+
+//         // Create HTTP POST request
+//         String postData = "action=getDevice_color&device_id=64"; // Change device_id as needed
+//         wifiClient.println("GET /sandbox_jacob/api.php HTTP/1.1");
+//         wifiClient.println("Host: it313communityprojects.website");
+//         wifiClient.println("Content-Type: application/x-www-form-urlencoded");
+//         wifiClient.print("Content-Length: ");
+//         wifiClient.println(postData.length());
+//         wifiClient.println();
+//         wifiClient.print(postData);
+
+//         // Wait for response
+//         while (wifiClient.connected() || wifiClient.available()) {
+//             if (wifiClient.available()) {
+//                 String line = wifiClient.readStringUntil('\n');
+//                 Serial.println(line);  // Print the response
+//                 // String topic = MQTT_SERIAL_RECEIVER_CH;
+//                 // String payload = "{\"status\":\"success\",";
+//                 // payload += "\"device_id\":";
+//                 // payload += device_id;
+//                 // payload += ",\"status\":";
+//                 // payload += status;
+//                 // payload += "}";
+
+
+//                 // Publish the payload to the MQTT broker
+//                 // client.publish(topic.c_str(), payload.c_str());
+//                 // Serial.print("Success response sent: ");
+//                 // Serial.println(payload);
+
+//                 // // Add a delay to avoid spamming the broker
+//                 // delay(5000);
+//             }
+//         }
+//         wifiClient.stop();
+
+//         if (!client.connected()) {
+//           connect_mqtt_server_secure(); // Custom function to reconnect
+//         }
+// }
+
+//     } else {
+//         Serial.println("Failed to connect to server");
+//     }
+// }
+
+
+void changeColor(byte *payload, unsigned int length) {
+  if (!client.connected()) {
+    connect_mqtt_server_secure();
+  }
+  // Create a char array with a length one char greater than the incoming payload
+  char p[length + 1];
+  /* memcpy copies the byte pattern from payload and copies it to new char array p
+     Copies count bytes from the object pointed to by src to the object pointed to by dest.
+     Most important => Both objects are reinterpreted as arrays of unsigned char */
+  memcpy(p, payload, length);
+  p[length] = '\0';
+  /* Cast the char array p to a String variable called message; This String can now
+     be parse to a JSONVar using JSON.parse(message) */
+  String message(p);
+  Serial.print("From changeColor(): ");
+  Serial.write(payload, length);
+  Serial.println();
+  Serial.println("Parse Actuator command");
+  //  const char messageTemplate[] = const char (message);
+  JSONVar jsonObject = JSON.parse(message);
+  const char* rawdevice_id = (const char*)jsonObject["device_id"];
+  String device_id(rawdevice_id);
+  int red = (int)jsonObject["red"];
+  int green = (int)jsonObject["green"];
+  int blue = (int)jsonObject["blue"];
+  Serial.print("Received Message for Device: ");
+  Serial.println(device_id);
+  Serial.println("RGB Color Received: "+String(red)+", "+String(green)+", "+String(blue));
+  if (device_id.equals("64")) {
+    String topic = MQTT_COLOR;
+    String payload = "{\"status\":\"success\",";
+    payload += "\"device_id\":";
+    payload += device_id;
+    payload += ",\"red\":";
+    payload += red;
+    payload += ",\"green\":";
+    payload += green;
+    payload += ",\"blue\":";
+    payload += blue;
+    payload += "}";
+
+
+    // Publish the payload to the MQTT broker
+    client.publish(topic.c_str(), payload.c_str());
+    Serial.print("Success response sent: ");
+    Serial.println(payload);
+
+    // Add a delay to avoid spamming the broker
+    delay(5000);
+
+
+    pixels.clear();  // Set all pixel colors to 'off'
+    uint32_t color = pixels.Color(scale*red, scale*green, scale*blue);
+    pixels.fill(color);
+    pixels.show();
+    Serial.println((const char *)jsonObject["message"]);
+    if ((String)(const char *)jsonObject["message"] == "On") {
+      digitalWrite(LED_pin, HIGH);
+      Serial.println("LED is ON");
+    } else if ((String)(const char *)jsonObject["message"] == "Off") {
+      digitalWrite(LED_pin, LOW);
+      Serial.println("LED is Off");
+    }
+
+    saveCurrentRGB(red, green, blue);
+  }
+}
+
+void saveCurrentRGB(int r, int g, int b) {
+  currentRGB[0] = r;
+  currentRGB[1] = g;
+  currentRGB[2] = b;
+  Serial.println("RGB Values Saved.");
+  Serial.println(currentRGB[0]);
+  Serial.println(currentRGB[1]);
+  Serial.println(currentRGB[2]);
+
+
+}
+
+
+void changeBrightness(byte *payload, unsigned int length) {
+  if (!client.connected()) {
+    connect_mqtt_server_secure();
+  }
+  // Create a char array with a length one char greater than the incoming payload
+  char p[length + 1];
+  /* memcpy copies the byte pattern from payload and copies it to new char array p
+     Copies count bytes from the object pointed to by src to the object pointed to by dest.
+     Most important => Both objects are reinterpreted as arrays of unsigned char */
+  memcpy(p, payload, length);
+  p[length] = '\0';
+  /* Cast the char array p to a String variable called message; This String can now
+     be parse to a JSONVar using JSON.parse(message) */
+  String message(p);
+  Serial.print("From changeBrightness(): ");
+  Serial.write(payload, length);
+  Serial.println();
+  Serial.println("Parse Actuator command");
+  //  const char messageTemplate[] = const char (message);
+  JSONVar jsonObject = JSON.parse(message);
+  const char* rawdevice_id = (const char*)jsonObject["device_id"];
+  String device_id(rawdevice_id);
+  int brightness = (int)jsonObject["sliderValue"];
+  Serial.print("Received Message for Device: ");
+  Serial.println(device_id);
+  Serial.println("Brightness Level Received: "+String(brightness));
+  if (device_id.equals("64")) {
+    String topic = MQTT_SLIDER;
+    String payload = "{\"status\":\"success\",";
+    payload += "\"device_id\":";
+    payload += device_id;
+    payload += ",\"brightness\":";
+    payload += brightness;
+    payload += "}";
+
+
+    // Publish the payload to the MQTT broker
+    client.publish(topic.c_str(), payload.c_str());
+    Serial.print("Success response sent: ");
+    Serial.println(payload);
+
+    // Add a delay to avoid spamming the broker
+    delay(5000);
+
+    applyBrightness(brightness);
+  }
+}
+
+void applyBrightness(int brightnessPercent) {
+  int rgb[3];
+  float brightnessScalar = brightnessPercent / 100.0; // Convert percentage to scalar
+  scale = brightnessScalar;
+
+  for (int i = 0; i < 3; i++) {
+    rgb[i] = int(currentRGB[i] * brightnessScalar); // Adjust brightness
+    rgb[i] = constrain(rgb[i], 0, 255);      // Ensure value is in range
+  }
+
+  Serial.print("Brightness Applied: ");
+  Serial.println(brightnessPercent);
+
+  Serial.println(rgb[0]);
+  Serial.println(rgb[1]);
+  Serial.println(rgb[2]);
+
+
+
+  pixels.clear();  // Set all pixel colors to 'off'
+  uint32_t color = pixels.Color(rgb[0], rgb[1], rgb[2]);
+  pixels.fill(color);
+  pixels.show();
+  // Serial.println((const char *)jsonObject["message"]);
+  // if ((String)(const char *)jsonObject["message"] == "On") {
+  // digitalWrite(LED_pin, HIGH);
+  // Serial.println("LED is ON");
+  // } else if ((String)(const char *)jsonObject["message"] == "Off") {
+  // digitalWrite(LED_pin, LOW);
+  // Serial.println("LED is Off");
+  // }
+}
+
+
+void changeTemp(byte *payload, unsigned int length) {
+  if (!client.connected()) {
+    connect_mqtt_server_secure();
+  }
+  // Create a char array with a length one char greater than the incoming payload
+  char p[length + 1];
+  /* memcpy copies the byte pattern from payload and copies it to new char array p
+     Copies count bytes from the object pointed to by src to the object pointed to by dest.
+     Most important => Both objects are reinterpreted as arrays of unsigned char */
+  memcpy(p, payload, length);
+  p[length] = '\0';
+  /* Cast the char array p to a String variable called message; This String can now
+     be parse to a JSONVar using JSON.parse(message) */
+  String message(p);
+  Serial.print("From changeTemp(): ");
+  Serial.write(payload, length);
+  Serial.println();
+  Serial.println("Parse Actuator command");
+  //  const char messageTemplate[] = const char (message);
+  JSONVar jsonObject = JSON.parse(message);
+  const char* rawdevice_id = (const char*)jsonObject["device_id"];
+  String device_id(rawdevice_id);
+  int Temperature = (int)jsonObject["temp"];
+  Serial.print("Received Message for Device: ");
+  Serial.println(device_id);
+  Serial.println("Changing Temperature to: "+String(Temperature)+" °F");
+  if (device_id.equals("64")) {
+    String topic = MQTT_TEMP;
+    String payload = "{\"status\":\"success\",";
+    payload += "\"device_id\":";
+    payload += device_id;
+    payload += ",\"Temperature\":";
+    payload += Temperature;
+    payload += "}";
+
+
+    // Publish the payload to the MQTT broker
+    client.publish(topic.c_str(), payload.c_str());
+    Serial.print("Success response sent: ");
+    Serial.println(payload);
+
+    // Add a delay to avoid spamming the broker
+    delay(5000);
+
+
+    // pixels.clear();  // Set all pixel colors to 'off'
+    // uint32_t color = pixels.Color(red, green, blue);
+    // pixels.fill(color);
+    // pixels.show();
+    // Serial.println((const char *)jsonObject["message"]);
+    // if ((String)(const char *)jsonObject["message"] == "On") {
+    //   digitalWrite(LED_pin, HIGH);
+    //   Serial.println("LED is ON");
+    // } else if ((String)(const char *)jsonObject["message"] == "Off") {
+    //   digitalWrite(LED_pin, LOW);
+    //   Serial.println("LED is Off");
+    // }
+  }
+}
+
+
+
+void publishSerialData(char *serialData) {
+  if (!client.connected()) {
+    connect_mqtt_server_secure();
+  }
+  client.publish(MQTT_SERIAL_PUBLISH_CH, serialData);
+}
+
+void publishTemp(char *p_temp) {
+
+  if (!client.connected()) {
+    connect_mqtt_server_secure();
+  }
+  client.publish(MQTT_TEMP_PUBLISH_CH, p_temp);
+}
+
+// Custom Function
+void getTemp() {
+
+  char chr_tempF[100];  // 26-29 characters in JSON message; add one more for null terminator '\0';
+                        // The compiler will automatically add the null terminator '\0' if left off, but need to have
+                        // array size n + 1 when creating char array
+                        // can check char array size with Serial.println(strlen(chr_tempC));
+
+  // Read Temperature from ADC
+  adc1_config_width(ADC_WIDTH_BIT_12);
+  adc1_config_channel_atten(ADC1_CHANNEL_0, ADC_ATTEN_DB_0);
+  int raw_val = adc1_get_raw(ADC1_CHANNEL_0);  // GPIO 36
+  Serial.println(raw_val);
+  voltage = raw_val / 4095.0;
+
+  Serial.println(voltage);
+  // Convert voltage reading to temperature in °C
+  tempC = (voltage - 0.5) * 100;  // Use with ESP32
+  // tempC = (voltage - 500) / 10;
+  // Convert °C to °F
+  tempF = (tempC * 9.0 / 5.0) + 32.0;
+
+  //  Print to Serial Monitor for Debugging
+  //  Serial.print("Temp C: ");
+  //  Serial.println(tempC);
+  //  Serial.print("Raw Reading: ");Serial.println(raw_val);
+  //  Serial.print("Voltage: ");Serial.println(voltage);
+
+  sprintf(chr_tempF, "{\"device_id\":%d, \"temp\":%02.2f}", device_id, tempF);
+  Serial.print("TempCharArray: ");
+  Serial.println(chr_tempF);
+  //Serial.print(strlen(chr_tempC));
+  publishTemp(chr_tempF);
+}
+
+void IRAM_ATTR onTime() {
+  portENTER_CRITICAL_ISR(&timerMux);
+  interrupts++;
+  portEXIT_CRITICAL_ISR(&timerMux);
+}
+
+void setup() {
+
+  Serial.begin(115200);
+  /* Configure Prescaler to 80, as our timer runs @ 80Mhz
+   Giving an output of 80,000,000 / 80 = 1,000,000 ticks / second
+   Link to Tutorial using Timer Interrupts with hyperlinks to Underlying Library:
+   https://techtutorialsx.com/2017/10/07/esp32-arduino-timer-interrupts/
+  */
+
+  //  Old version 2.0.10 Board Manager Versioon  - Configure the timer
+  // timer = timerBegin(0, 80, true);
+  // timerAttachInterrupt(timer, &onTime, true);
+
+  // New version 3.1.3  Espressif Board Manager - To Configure the timer
+  // timer = timerBegin(1000000);           // Timer frequency: 1 MHz (1 tick  = 1 microsecond)
+  // timerAttachInterrupt(timer, &onTime);  // Attach timer interrupt
+  // timerAlarm(timer, 5000000, true, 1);
+
+  /* Fires Interrupt Service Routine (ISR)
+     every 5,000,000/1,000,000 = 5 seconds;
+     The ISR is defined on lines 14-17 called onTimer()
+     If you want to change the frequency of the timer interrupt
+     you can change the second argument.
+
+      1000000  = fires every second
+      5000000  = fires every 5 seconds
+     10000000  = fires every 10 seconds
+     20000000  = fires every 20 seconds
+
+     etc.
+  */
+
+  pinMode(LED_pin, OUTPUT);
+  digitalWrite(LED_pin, LOW);
+
+  client.setServer(MQTT_SERVER, MQTT_PORT);
+  client.setCallback(callback);
+  wifiClient.setCACert(root_ca);
+
+  setup_wifi();
+  //  connect_wifi_secure();
+  //  connect_mqtt_server_secure();
+  pixels.begin(); // Initialize the NeoPixel library
+
+}
+
+void loop() {
+
+  /* If client isn't connected or loses connection to the broker this code block
+   *  will reestablish a connection
+   */
+  if (!client.connected()) {
+    connect_mqtt_server_secure();
+  }
+
+  /* client.loop() allows the client to maintain the connection to the broker
+   * and to check for any incoming messages
+   */
+  client.loop();
+
+  if (interrupts > 0) {
+    portENTER_CRITICAL(&timerMux);
+    interrupts--;
+    portEXIT_CRITICAL(&timerMux);
+    // getTemp();
+  }
+
+  if (Serial.available() > 0) {
+
+    char mun[501];
+    /* Description:
+        The C library function void *memset(void *str, int c, size_t n) copies the
+        character c (an unsigned char) to the first n characters of the string
+        pointed to, by the argument str. This ex (memset(mun,0,501)) copies a zero (0)
+        into each element (all 501) in the char array mun[501].
+     */
+    memset(mun, 0, 501);
+
+    /* Description:
+        Serial.readBytesUntil() reads characters from the serial buffer into an array.
+        The function terminates (checks being done in this order) if the determined
+        length has been read, if it times out (see Serial.setTimeout()), or if the
+        terminator character is detected (in which case the function returns the
+        characters up to the last character before the supplied terminator). The
+        terminator itself is not returned in the buffer.
+     */
+    Serial.readBytesUntil('\n', mun, 500);
+
+    /* Publish the value of mun to the MQTT Broker. */
+    publishSerialData(mun);
+
+    /* Print mun to the Serial monitor for debugging */
+    Serial.println(mun);
+  }
+}
