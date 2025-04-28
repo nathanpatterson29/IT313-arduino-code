@@ -1,0 +1,249 @@
+#include <Adafruit_NeoPixel.h>
+#include "credentials.h"
+#include <WiFi.h>             /* C:\Users\bacag\AppData\Local\Arduino15\packages\esp32\hardware\esp32\2.0.17\libraries\WiFi\src\WiFi.h */
+#include <WiFiClientSecure.h> /* WiFiClient Library for encrypting data over SSL/TSL */
+#include "certificate.h"
+#include <PubSubClient.h> /* MQTT Publish/Subscribe Library by Nick O'Leary v2.8 imported from Library Manager */
+#include <Arduino_JSON.h> /* Arduino_JSON by Arduino: Process JSON in your Arduino Sketches v0.2.0 imported from Library Manager */
+
+int ledPin = 13;                // Built-in LED for debug
+int inputPin = 2;               // PIR sensor input pin
+int pirState = LOW;             // Motion tracking
+int val = 0;                    // PIR reading
+int device_id = 60;
+const char *ssid = mySSID_0;
+const char *password = myPASSWORD_0;
+
+WiFiClientSecure wifiClient;
+PubSubClient client(wifiClient);
+
+#define NEOPIXEL_PIN1 12
+#define NEOPIXEL_PIN2 14         // NeoPixel DIN pin
+#define NUMPIXELS    24         // 24-ring NeoPixel
+#define MQTT_MOTION_DETECTOR "it313/motion_detector"
+#define MQTT_PING "it313/channel/ping/60"
+
+Adafruit_NeoPixel ring1 = Adafruit_NeoPixel(NUMPIXELS, NEOPIXEL_PIN1, NEO_RGBW + NEO_KHZ800);
+Adafruit_NeoPixel ring2 = Adafruit_NeoPixel(NUMPIXELS, NEOPIXEL_PIN2, NEO_RGBW + NEO_KHZ800);
+
+void setup() {
+  pinMode(ledPin, OUTPUT);
+  pinMode(inputPin, INPUT);
+  Serial.begin(115200);
+  client.setServer(MQTT_SERVER, MQTT_PORT);
+  client.setCallback(callback);
+  wifiClient.setCACert(root_ca);
+
+  setup_wifi();
+  //  connect_wifi_secure();
+  //  connect_mqtt_server_secure();
+
+  ring1.begin();
+  ring1.setBrightness(30);  // Reduce brightness
+  ring1.clear();
+  ring1.show();
+
+  ring2.begin();
+  ring2.setBrightness(30);  // Reduce brightness
+  ring2.clear();
+  ring2.show();
+}
+
+void loop() {
+  val = digitalRead(inputPin);
+  
+  if (val == HIGH) {
+    digitalWrite(ledPin, HIGH);
+
+    if (pirState == LOW) {
+      Serial.println("Motion detected!");
+      turnOnAllPixels();            // <-- Light up in a circle
+      pirState = HIGH;
+      String topic = MQTT_MOTION_DETECTOR;
+      String payload = "{\"status\":\"success\",";
+      payload += "\"device_id\":\"";
+      payload += device_id;
+      payload += "\",\"device_status\":\"On\"}";
+      
+
+      client.publish(topic.c_str(), payload.c_str());
+    }
+  } else {
+    digitalWrite(ledPin, LOW);
+    if (pirState == HIGH) {
+      Serial.println("Motion ended!");
+      ring1.clear();
+      ring1.show();
+      ring2.clear();
+      ring2.show();
+      pirState = LOW;
+      String topic = MQTT_MOTION_DETECTOR;
+      String payload = "{\"status\":\"success\",";
+      payload += "\"device_id\":\"";
+      payload += device_id;
+      payload += "\",\"device_status\":\"Off\"}";
+
+      client.publish(topic.c_str(), payload.c_str());
+
+    }
+  }
+}
+
+void turnOnAllPixels() {
+  ring1.fill(ring1.Color(255, 255, 255));
+  ring1.show();
+  ring2.fill(ring2.Color(255, 255, 255));
+  ring2.show();
+}
+
+// Function to publish device status
+void publishDeviceStatus(byte *payload, unsigned int length) {
+  String topic = "it313/channel/ping";
+  String data = "{\"status\":\"online\",\"device_id\":60}";
+
+  // Convert `String` to `const char*`
+  client.publish(topic.c_str(), data.c_str());
+  Serial.print("Published status: ");
+  Serial.println(data);
+}
+
+void connect_wifi_secure() {
+  delay(10);
+  Serial.println();
+  Serial.print("Connecting to ");
+  Serial.println(ssid);
+  WiFi.begin(ssid, password);
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.print(".");
+  }
+  randomSeed(micros());
+  Serial.println("");
+  Serial.println("WiFi connected");
+  Serial.println("IP address: ");
+  Serial.println(WiFi.localIP());
+}
+
+void connect_mqtt_server_secure() {
+  /* Loop until we're reconnected */
+  unsigned long startAttemptConnectMQTTTime = millis();
+  while (!client.connected() and startAttemptConnectMQTTTime - millis() < 5000) {
+    Serial.print("Attempting connection to ");
+    Serial.print(MQTT_SERVER);
+    Serial.print("...");
+
+    /* Create a random client ID- */
+    String clientId = "ESP32Client-";
+    clientId += String(random(0xffff), HEX);
+
+    /* Attempt to connect */
+    if (client.connect(clientId.c_str(), MQTT_USER, MQTT_PASSWORD)) {
+      Serial.println("Connection Successful!");
+
+      /* Visual Indication of Connection to MQTT Broker */
+      for (int i = 0; i < 5; i++) {
+        digitalWrite(5, HIGH);
+        delay(75);
+        digitalWrite(5, LOW);
+        delay(75);
+      }
+
+      /* Once connected, publish an announcement... */
+      // client.publish("it313/channel/connect_notification", "Jacob's ESP 32 Connected");
+
+      /* ... and resubscribe */
+      client.subscribe(MQTT_MOTION_DETECTOR);
+      client.subscribe(MQTT_PING);
+
+
+
+
+
+
+    } else {
+      Serial.print("failed, rc=");
+      Serial.print(client.state());
+      ESP.restart();
+    }
+  }
+}
+
+void setup_wifi() {
+
+  const char *ssid;
+  const char *password;
+
+  int n = WiFi.scanNetworks();
+  if (n == 0) {
+    Serial.println("No Networks Found!");
+  } else {
+    for (int i = 0; i < n; ++i) {
+      if (WiFi.SSID(i) == "JAM16") {
+        // Update these with values suitable for your network from credential.h.
+        ssid = mySSID_0;
+        password = myPASSWORD_0;
+        break;
+      } else if (WiFi.SSID(i) == "JMU5") {
+        // Update these with values suitable for your network from credential.h.
+        ssid = mySSID_1;
+        password = myPASSWORD_1;
+        break;
+      } else {
+        // Update these with values suitable for your network from credential.h.
+        ssid = mySSID_2;
+        password = myPASSWORD_2;
+      }
+    }
+  }
+
+  unsigned long startConnectWiFiTime = millis();
+  int wifiCounter = 0;
+
+  delay(10);
+  // We start by connecting to a WiFi network
+  Serial.println();
+  Serial.print("Connecting to ");
+  Serial.println(ssid);
+  WiFi.begin(ssid, password);
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.print(".");
+    if (startConnectWiFiTime - millis() > 20000) {
+      wifiCounter += 1;
+    }
+    if (wifiCounter > 20) {
+      wifiCounter = 0;
+      ESP.restart();
+    }
+  }
+  randomSeed(micros());
+  Serial.println("");
+  Serial.println("WiFi connected");
+  Serial.println("IP address: ");
+  Serial.println(WiFi.localIP());
+  for (int i = 0; i < 5; i++) {
+    digitalWrite(5, HIGH);
+    delay(250);
+    digitalWrite(5, LOW);
+    delay(250);
+  }
+  /* Set the CA_CERTIFICATE to be used by wifiClient -- root_ca must be created
+     copied, and pasted in certificate.h -- Tutorial to create ca_root certificate: https://www.youtube.com/watch?v=Wm1xKj4bKsY */
+  wifiClient.setCACert(root_ca);
+
+  client.setServer(MQTT_SERVER, MQTT_PORT);
+  client.setCallback(callback);
+  connect_mqtt_server_secure();
+}
+
+void callback(char *topic, byte *payload, unsigned int length) {
+  Serial.println("-------new message from broker-----");
+  Serial.print("channel:");
+  Serial.println(topic);
+  Serial.print("data:");
+  Serial.write(payload, length);
+  Serial.println();
+  if (strcmp(topic, "it313/channel/ping/60") == 0){
+    publishDeviceStatus(payload, length);
+ }
+}
